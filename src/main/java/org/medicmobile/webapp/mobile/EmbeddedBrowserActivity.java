@@ -23,13 +23,21 @@ import org.xwalk.core.XWalkSettings;
 import org.xwalk.core.XWalkUIClient;
 import org.xwalk.core.XWalkView;
 
+import static android.provider.MediaStore.ACTION_IMAGE_CAPTURE;
+import static java.lang.Boolean.parseBoolean;
 import static org.medicmobile.webapp.mobile.BuildConfig.DEBUG;
 import static org.medicmobile.webapp.mobile.BuildConfig.DISABLE_APP_URL_VALIDATION;
 import static org.medicmobile.webapp.mobile.MedicLog.trace;
 import static org.medicmobile.webapp.mobile.MedicLog.warn;
 import static org.medicmobile.webapp.mobile.SimpleJsonClient2.redactUrl;
+import static org.medicmobile.webapp.mobile.Utils.intentHandlerAvailableFor;
 
 public class EmbeddedBrowserActivity extends LockableActivity {
+	/** Any activity result with all 3 low bits set is _not_ a simprints result. */
+	private static final int NON_SIMPRINTS_FLAGS = 0x7;
+	private static final int CAPTURE_IMAGE = (1 << 3) | NON_SIMPRINTS_FLAGS;
+	private static final int CHOOSE_FILE = (2 << 3) | NON_SIMPRINTS_FLAGS;
+
 	private static final ValueCallback<String> IGNORE_RESULT = new ValueCallback<String>() {
 		public void onReceiveValue(String result) { /* ignore */ }
 	};
@@ -45,6 +53,8 @@ public class EmbeddedBrowserActivity extends LockableActivity {
 	private XWalkView container;
 	private SettingsStore settings;
 	private SimprintsSupport simprints;
+
+	private ValueCallback<Uri> uploadCallback;
 
 	@Override public void onCreate(Bundle savedInstanceState) {
 		super.onCreate(savedInstanceState);
@@ -121,7 +131,18 @@ public class EmbeddedBrowserActivity extends LockableActivity {
 
 	@Override protected void onActivityResult(int requestCode, int resultCode, Intent i) {
 		trace(this, "onActivityResult() :: requestCode=%s, resultCode=%s", requestCode, resultCode);
-		try {
+		if((requestCode & NON_SIMPRINTS_FLAGS) == NON_SIMPRINTS_FLAGS) {
+			switch(requestCode) {
+				case CAPTURE_IMAGE:
+					trace(this, "Should handle captured image...");
+				case CHOOSE_FILE:
+					if(uploadCallback != null) {
+						uploadCallback.onReceiveValue(i == null || resultCode != RESULT_OK ? null : i.getData());
+						uploadCallback = null;
+					} else warn(this, "uploadCallback is null for requestCode %s", requestCode);
+					return;
+			}
+		} else try {
 			String js = simprints.process(requestCode, i);
 			trace(this, "Execing JS: %s", js);
 			evaluateJavascript(js);
@@ -173,6 +194,24 @@ public class EmbeddedBrowserActivity extends LockableActivity {
 						cm.lineNumber(),
 						cm.message());
 				return true;
+			}
+
+			@Override public void openFileChooser(XWalkView view, ValueCallback<Uri> callback, String acceptType, String shouldCapture) {
+				trace(this, "openFileChooser() :: %s,%s,%s,%s", view, callback, acceptType, shouldCapture);
+				uploadCallback = callback;
+
+				if(parseBoolean(shouldCapture)) {
+					Intent i = new Intent(ACTION_IMAGE_CAPTURE);
+					if(intentHandlerAvailableFor(EmbeddedBrowserActivity.this, i)) {
+						startActivityForResult(i, CAPTURE_IMAGE);
+						return;
+					}
+				}
+
+				Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+				i.addCategory(Intent.CATEGORY_OPENABLE);
+				i.setType(acceptType);
+				EmbeddedBrowserActivity.this.startActivityForResult(Intent.createChooser(i, "File Chooser"), CHOOSE_FILE);
 			}
 
 			/*
